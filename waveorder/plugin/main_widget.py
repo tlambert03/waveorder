@@ -257,9 +257,7 @@ class MainWidget(QWidget):
 
         ## Initialize attributes
         self.connected_to_mm = False
-        self.bridge = None
-        self.mm = None
-        self.mmc = None
+        self.mmc = None  # CMMCore object
         self.calib = None
         self.current_dir_path = str(Path.cwd())
         self.current_save_path = str(Path.cwd())
@@ -816,21 +814,10 @@ class MainWidget(QWidget):
         -------
 
         """
-        try:
-            from waveorder.io.mm_backend import connect_to_mm, MMConnectionError
+        from waveorder.io.mm_backend import connect_to_mm
             
-            self.mm_backend = connect_to_mm()
-            self.mmc = self.mm_backend.get_core()
-            logging.debug("Established connection to Micro-Manager")
-            
-        except MMConnectionError as ex:
-            print(f"Could not establish connection to Micro-Manager: {ex}")
-            raise EnvironmentError(f"Could not establish connection to Micro-Manager: {ex}")
-        except Exception as ex:
-            print(f"Unexpected error connecting to Micro-Manager: {ex}")
-            raise EnvironmentError(f"Unexpected error connecting to Micro-Manager: {ex}")
-
-        logging.debug("Confirmed MM connection")
+        self.mm_backend = connect_to_mm()
+        self.mmc = self.mm_backend.get_core()
 
         # Find config group containing calibration channels
         # calib_channels is typically ['State0', 'State1', 'State2', ...]
