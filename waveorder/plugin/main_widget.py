@@ -12,20 +12,11 @@ from typing import TYPE_CHECKING
 
 import dask.array as da
 import numpy as np
-from numpy.typing import NDArray
 from numpydoc.docscrape import NumpyDocString
-from packaging import version
 from qtpy.QtCore import Qt, Signal, Slot
 from qtpy.QtGui import QColor, QPixmap
 from qtpy.QtWidgets import QFileDialog, QSizePolicy, QSlider, QWidget
 from superqt import QDoubleRangeSlider, QRangeSlider
-
-from waveorder.waveorder_reconstructor import waveorder_microscopy
-
-try:
-    from pycromanager import Core, Studio, zmq_bridge
-except:
-    pass
 
 try:
     from napari import Viewer
@@ -49,14 +40,16 @@ from waveorder.calib.calibration_workers import (
     CalibrationWorker,
     load_calibration,
 )
-from waveorder.io.core_functions import set_lc_state, snap_and_average
+from waveorder.io.core_functions import set_lc_state
 from waveorder.io.metadata_reader import MetadataReader
 from waveorder.io.visualization import ret_ori_overlay
 from waveorder.plugin import gui
 
 # avoid runtime import error
 if TYPE_CHECKING:
-    pass
+    from numpy.typing import NDArray
+
+    from waveorder.waveorder_reconstructor import waveorder_microscopy
 
 
 class MainWidget(QWidget):
@@ -815,7 +808,7 @@ class MainWidget(QWidget):
     @Slot(bool)
     def connect_to_mm(self):
         """
-        Establishes the python/java bridge to Micro-Manager.  Micro-Manager must be open with a config loaded
+        Establishes the connection to Micro-Manager.  Micro-Manager must be open with a config loaded
         in order for the connection to be successful.  On connection, it will populate all of the available config
         groups.  Config group choice is used to establish which config group the Polarization states live in.
 
@@ -823,56 +816,21 @@ class MainWidget(QWidget):
         -------
 
         """
-        RECOMMENDED_MM = "20230426"
-        ZMQ_TARGET_VERSION = "4.2.0"
         try:
-            self.mmc = Core(convert_camel_case=False)
-            # Check it works
-            self.mmc.getAvailableConfigGroups()
-            self.mm = Studio(convert_camel_case=False)
-            # Order is important: If the bridge is created before Core, Core will not work
-            self.bridge = zmq_bridge._bridge._Bridge()
-            logging.debug("Established ZMQ Bridge and found Core and Studio")
-        except NameError:
-            print("Is pycromanager package installed?")
+            from waveorder.io.mm_backend import connect_to_mm, MMConnectionError
+            
+            self.mm_backend = connect_to_mm()
+            self.mmc = self.mm_backend.get_core()
+            logging.debug("Established connection to Micro-Manager")
+            
+        except MMConnectionError as ex:
+            print(f"Could not establish connection to Micro-Manager: {ex}")
+            raise EnvironmentError(f"Could not establish connection to Micro-Manager: {ex}")
         except Exception as ex:
-            print(
-                "Could not establish pycromanager bridge.\n"
-                "Is Micro-Manager open?\n"
-                "Is Tools > Options > Run server on port 4827 checked?\n"
-                f"Are you using nightly build {RECOMMENDED_MM}?\n"
-            )
-            template = "An exception of type {0} occurred. Arguments:\n{1!r}"
-            message = template.format(type(ex).__name__, ", ".join(ex.args))
-            print(message)
-            raise EnvironmentError(
-                "Could not establish pycromanager bridge.\n"
-                "Is Micro-Manager open?\n"
-                "Is Tools > Options > Run server on port 4827 checked?\n"
-                f"Are you using nightly build {RECOMMENDED_MM}?"
-            )
+            print(f"Unexpected error connecting to Micro-Manager: {ex}")
+            raise EnvironmentError(f"Unexpected error connecting to Micro-Manager: {ex}")
 
-        # Warn the user if there is a Micro-Manager/ZMQ version mismatch
-        # NS: Not quite sure what this is good for, we already know the Core works
-        # This code uses undocumented PycroManager features, so may well break in the future
-        self.bridge._main_socket.send({"command": "connect", "debug": False})
-        reply_json = self.bridge._main_socket.receive(timeout=500)
-        zmq_mm_version = reply_json["version"]
-        if zmq_mm_version != ZMQ_TARGET_VERSION:
-            upgrade_str = (
-                "upgrade"
-                if version.parse(zmq_mm_version)
-                < version.parse(ZMQ_TARGET_VERSION)
-                else "downgrade"
-            )
-            logging.warning(
-                (
-                    "This version of Micro-Manager has not been tested with waveorder.\n"
-                    f"Please {upgrade_str} to Micro-Manager nightly build {RECOMMENDED_MM}."
-                )
-            )
-
-        logging.debug("Confirmed correct ZMQ bridge----")
+        logging.debug("Confirmed MM connection")
 
         # Find config group containing calibration channels
         # calib_channels is typically ['State0', 'State1', 'State2', ...]
@@ -1432,8 +1390,8 @@ class MainWidget(QWidget):
         """
         # if/else takes care of the clearing of config
         if self.ui.cb_config_group.count() != 0:
-            self.mmc = Core(convert_camel_case=False)
-            self.mm = Studio(convert_camel_case=False)
+            if hasattr(self, 'mm_backend') and self.mm_backend.is_connected():
+                self.mmc = self.mm_backend.get_core()
 
             # Gather config groups and their children
             self.config_group = self.ui.cb_config_group.currentText()
@@ -1786,9 +1744,9 @@ class MainWidget(QWidget):
 
         # Snap images from the extinction state and first elliptical state
         set_lc_state(self.mmc, self.config_group, "State0")
-        extinction = snap_and_average(self.calib.snap_manager)
+        extinction = self.mm_backend.snap_and_average()
         set_lc_state(self.mmc, self.config_group, "State1")
-        state1 = snap_and_average(self.calib.snap_manager)
+        state1 = self.mm_backend.snap_and_average()
 
         # Calculate extinction based off captured intensities
         extinction = self.calib.calculate_extinction(
@@ -1839,8 +1797,8 @@ class MainWidget(QWidget):
 
         # FIXME: for 1.0.0 we'd like to avoid MM call in the main thread
         # Make sure Live Mode is off
-        if self.calib.snap_manager.getIsLiveModeOn():
-            self.calib.snap_manager.setLiveModeOn(False)
+        if self.mm_backend.is_live_mode_on():
+            self.mm_backend.set_live_mode(False)
 
         # initialize worker properties for multi-threading
         self.ui.qbutton_stop_calib.clicked.connect(self.worker.quit)
@@ -1895,8 +1853,8 @@ class MainWidget(QWidget):
 
         # FIXME: for 1.0.0 we'd like to avoid MM call in the main thread
         # Make sure Live Mode is off
-        if self.calib.snap_manager.getIsLiveModeOn():
-            self.calib.snap_manager.setLiveModeOn(False)
+        if self.mm_backend.is_live_mode_on():
+            self.mm_backend.set_live_mode(False)
 
         # Init Worker and Thread
         self.worker = CalibrationWorker(self, self.calib)

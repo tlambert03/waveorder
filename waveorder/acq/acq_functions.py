@@ -7,13 +7,13 @@ import numpy as np
 from iohub.mmstack import MMStack
 
 try:
-    from pycromanager import Studio
+    from waveorder.io.mm_backend import MMBackend
 except:
     pass
 
 
 def generate_acq_settings(
-    mm,
+    mm_backend: MMBackend,
     channel_group,
     channels=None,
     zstart=None,
@@ -25,7 +25,7 @@ def generate_acq_settings(
     keep_shutter_open_slices=False,
 ):
     """
-    This function generates a json file specific to the Micro-Manager SequenceSettings.
+    This function generates acquisition settings for MDA sequences.
     It has default parameters for a multi-channels z-stack acquisition but does not yet
     support multi-position or multi-frame acquisitions.
 
@@ -34,130 +34,62 @@ def generate_acq_settings(
 
     Parameters
     ----------
-    mm:             (object) MM Studio API object
-    scheme:         (str) '4-State' or '5-State'
+    mm_backend:     (MMBackend) MM backend instance
+    channel_group:  (str) name of the channel group 
+    channels:       (list) list of channel names
     zstart:         (float) relative starting position for the z-stack
     zend:           (float) relative ending position for the z-stack
     zstep:          (float) step size for the z-stack
     save_dir:       (str) path to save directory
     prefix:         (str) name to save the data under
+    keep_shutter_open_channels: (bool) keep shutter open between channels
+    keep_shutter_open_slices:   (bool) keep shutter open between slices
 
     Returns
     -------
-    settings:       (json) json dictionary conforming to MM SequenceSettings
+    settings:       (dict) acquisition settings dictionary
     """
-
-    # Get API Objects
-    am = mm.getAcquisitionManager()
-    ss = am.getAcquisitionSettings()
-    app = mm.app()
-
-    # Get current SequenceSettings to modify
-    original_ss = ss.toJSONStream(ss)
-    original_json = json.loads(original_ss).copy()
-
-    if zstart:
-        do_z = True
-    else:
-        do_z = False
-
-    # Structure of the channel properties
-    channel_dict = {
-        "channelGroup": channel_group,
-        "config": None,
-        "exposure": None,
-        "zOffset": 0,
-        "doZStack": do_z,
-        "color": {"value": -16747854, "falpha": 0.0},
-        "skipFactorFrame": 0,
-        "useChannel": True if channels else False,
-    }
-
-    channel_list = None
-    if channels:
-        # Append all the channels with their current exposure settings
-        channel_list = []
-        for chan in channels:
-            # todo: think about how to deal with missing exposure
-            exposure = app.getChannelExposureTime(
-                channel_group, chan, 10
-            )  # sets exposure to 10 if not found
-            channel = channel_dict.copy()
-            channel["config"] = chan
-            channel["exposure"] = exposure
-
-            channel_list.append(channel)
-
-    # set other parameters
-    original_json["numFrames"] = 1
-    original_json["intervalMs"] = 0
-    original_json["relativeZSlice"] = True
-    original_json["slicesFirst"] = True
-    original_json["timeFirst"] = False
-    original_json["keepShutterOpenSlices"] = keep_shutter_open_slices
-    original_json["keepShutterOpenChannels"] = keep_shutter_open_channels
-    original_json["useAutofocus"] = False
-    original_json["saveMode"] = "MULTIPAGE_TIFF"
-    original_json["save"] = True if save_dir else False
-    original_json["root"] = save_dir if save_dir else ""
-    original_json["prefix"] = prefix if prefix else "Untitled"
-    original_json["channels"] = channel_list
-    original_json["zReference"] = 0.0
-    original_json["channelGroup"] = channel_group
-    original_json["usePositionList"] = False
-    original_json["shouldDisplayImages"] = True
-    original_json["useSlices"] = do_z
-    original_json["useFrames"] = False
-    original_json["useChannels"] = True if channels else False
-    original_json["slices"] = (
-        list(np.arange(float(zstart), float(zend + zstep), float(zstep)))
-        if zstart
-        else []
+    
+    return mm_backend.generate_acquisition_settings(
+        channel_group=channel_group,
+        channels=channels,
+        zstart=zstart,
+        zend=zend,
+        zstep=zstep,
+        save_dir=save_dir,
+        prefix=prefix,
+        keep_shutter_open_channels=keep_shutter_open_channels,
+        keep_shutter_open_slices=keep_shutter_open_slices,
     )
-    original_json["sliceZStepUm"] = zstep
-    original_json["sliceZBottomUm"] = zstart
-    original_json["sliceZTopUm"] = zend
-    original_json["acqOrderMode"] = 1
-
-    return original_json
 
 
 def acquire_from_settings(
-    mm: Studio,
+    mm_backend: MMBackend,
     settings: dict,
     grab_images: bool = True,
-    restore_settings: bool = True,
 ) -> np.typing.NDArray:
-    """Function to acquire an MDA acquisition with the native MM MDA Engine.
+    """Function to acquire an MDA acquisition with the MM backend.
     Assumes single position acquisition.
 
     Parameters
     ----------
-    mm : Studio
+    mm_backend : MMBackend
+        MM backend instance
     settings : dict
-        JSON dictionary conforming to MM SequenceSettings
+        Acquisition settings dictionary
     grab_images : bool, optional
         return the acquired array, by default True
-    restore_settings : bool, optional
-        restore MDA settings before acquisition, by default True
 
     Returns
     -------
     NDArray
         acquired images
     """
-    am = mm.getAcquisitionManager()
-    ss = am.getAcquisitionSettings()
-
-    ss_new = ss.fromJSONStream(json.dumps(settings))
-    am.runAcquisitionWithSettings(ss_new, True)
+    mm_backend.run_acquisition(settings)
 
     time.sleep(3)
 
-    if restore_settings:
-        am.setAcquisitionSettings(ss)
-
-    # TODO: speed improvements in reading the data with pycromanager acquisition?
+    # TODO: speed improvements in reading the data with direct acquisition?
     if grab_images:
         # get the most recent acquisition if multiple
         path = os.path.join(settings["root"], settings["prefix"])
